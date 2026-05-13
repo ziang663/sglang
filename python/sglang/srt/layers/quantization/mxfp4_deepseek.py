@@ -651,13 +651,25 @@ class DeepSeekMxfp4MoEMethod:
 
 def _mxfp4_predicate(layer, server_args):
     import os
+    from sglang.srt.environ import envs
+
     env = os.environ.get("SGLANG_V4_USE_TRITON_KERNELS")
     if env == "1":
         do_wrap = True
     elif env == "0":
         do_wrap = False
     else:
-        do_wrap = (server_args.kt_method or "").upper() == "MXFP4"
+        # Historically this wrapper was activated by the KT path because
+        # `--kt-method MXFP4` was the only supported way to serve V4-Flash on
+        # consumer Blackwell.  For a pure SGLang GPU path, activate it whenever
+        # the DeepSeek-V4 2604 checkpoint probe found FP4 routed experts.
+        do_wrap = (
+            (server_args.kt_method or "").upper() == "MXFP4"
+            or (
+                envs.SGLANG_DSV4_MODE.get() == "2604"
+                and envs.SGLANG_DSV4_FP4_EXPERTS.get()
+            )
+        )
     if not do_wrap:
         return None
     return True  # ctx sentinel; factory reads layer attrs
