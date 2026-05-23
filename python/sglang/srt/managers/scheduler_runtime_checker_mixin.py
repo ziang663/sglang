@@ -273,8 +273,16 @@ class SchedulerRuntimeCheckerMixin:
         if self.enable_hisparse:
             full_num_used = max(0, full_num_used)
             swa_num_used = max(0, swa_num_used)
-        full_token_usage = full_num_used / self.full_tokens_per_layer
-        swa_token_usage = swa_num_used / self.swa_tokens_per_layer
+        full_token_usage = (
+            full_num_used / self.full_tokens_per_layer
+            if self.full_tokens_per_layer > 0
+            else 0.0
+        )
+        swa_token_usage = (
+            swa_num_used / self.swa_tokens_per_layer
+            if self.swa_tokens_per_layer > 0
+            else 0.0
+        )
 
         return PoolStats(
             is_hybrid_swa=True,

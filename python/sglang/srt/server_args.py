@@ -2003,6 +2003,20 @@ class ServerArgs:
             from sglang.srt.arg_groups.deepseek_v4_hook import validate_deepseek_v4_cp
 
             validate_deepseek_v4_cp(self)
+            if (
+                self.quantization is None
+                and not self._quantization_explicitly_unset
+            ):
+                self.quantization = get_quantization_config(hf_config)
+            if self.moe_runner_backend == "auto":
+                is_fp4_experts = getattr(
+                    self.get_model_config(), "is_fp4_experts", False
+                )
+                if is_fp4_experts and is_sm120_supported():
+                    self.moe_runner_backend = "flashinfer_mxfp4"
+                    logger.info(
+                        "Use DeepSeek V4 Flash GPU-only MXFP4 MoE path on SM120."
+                    )
 
         elif model_arch in ["GptOssForCausalLM"]:
             # Set attention backend for GPT-OSS

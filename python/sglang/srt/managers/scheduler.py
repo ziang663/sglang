@@ -1537,6 +1537,9 @@ class Scheduler(
     def event_loop_normal(self):
         """A normal scheduler loop."""
         while True:
+            if self._need_dsv4_flash_mxfp4_tp_loop_sync():
+                barrier(group=self.tp_cpu_group)
+
             # Receive requests
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -1559,6 +1562,13 @@ class Scheduler(
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+
+    def _need_dsv4_flash_mxfp4_tp_loop_sync(self) -> bool:
+        return (
+            self.tp_size > 1
+            and not self.server_args.enable_dp_attention
+            and self.server_args.moe_runner_backend == "flashinfer_mxfp4"
+        )
 
     @DynamicGradMode()
     def event_loop_overlap(self):

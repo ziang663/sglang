@@ -573,6 +573,11 @@ class Envs:
     # DeepSeek V4
     # ====================================================================
 
+    # Optional compatibility flags used by the DeepSeek V4 Flash GPU-only
+    # MXFP4 path ported from ktransformers' SGLang integration.
+    SGLANG_DSV4_MODE = EnvStr("")
+    SGLANG_DSV4_2604_SUBMODE = EnvStr("")
+
     # Set False when using FP4-to-FP8 converted DeepSeek V4 checkpoint.
     SGLANG_DSV4_FP4_EXPERTS = EnvBool(True)
     # Default reasoning_effort for dsv4 chat encoder when request doesn't set it.
@@ -580,7 +585,7 @@ class Envs:
     SGLANG_DSV4_REASONING_EFFORT = EnvStr("")
 
     # CUDA kernels
-    SGLANG_OPT_DEEPGEMM_HC_PRENORM = EnvBool(True)
+    SGLANG_OPT_DEEPGEMM_HC_PRENORM = EnvBool(False)
     SGLANG_OPT_USE_TILELANG_MHC_PRE = EnvBool(True)
     SGLANG_OPT_USE_TILELANG_MHC_POST = EnvBool(True)
     SGLANG_OPT_USE_TILELANG_INDEXER = EnvBool(False)
@@ -616,14 +621,17 @@ class Envs:
     # TopK
     SGLANG_OPT_USE_FUSED_HASH_TOPK = EnvBool(True)
     SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK = EnvBool(True)
-    SGLANG_OPT_USE_TOPK_V2 = EnvBool(True)
+    SGLANG_OPT_USE_TOPK_V2 = EnvBool(False)
 
     # GEMM / kernel fusion
-    SGLANG_OPT_FP8_WO_A_GEMM = EnvBool(True)
+    SGLANG_OPT_FP8_WO_A_GEMM = EnvBool(False)
     SGLANG_OPT_BF16_FP32_GEMM_ALGO = EnvStr("cublas")
     SGLANG_OPT_USE_JIT_EP_ACTIVATION = EnvBool(True)
     SGLANG_OPT_FUSE_WQA_WKV = EnvBool(True)
     SGLANG_OPT_SWIGLU_CLAMP_FUSION = EnvBool(True)
+    SGLANG_OPT_MXFP4_FUSE_RSF_SHARED_ADD = EnvBool(False)
+    SGLANG_OPT_MXFP4_STATIC_SCALE_ONES = EnvBool(False)
+    SGLANG_OPT_MXFP4_SKIP_DISPATCHER_MAPPING = EnvBool(False)
 
     # Cache / overlap
     SGLANG_OPT_USE_FUSED_STORE_CACHE = EnvBool(True)

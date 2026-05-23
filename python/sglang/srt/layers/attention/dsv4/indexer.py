@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import torch
@@ -17,6 +18,7 @@ from sglang.srt.configs.deepseek_v4 import DeepSeekV4Config
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.dsv4.compressor import Compressor
 from sglang.srt.layers.attention.dsv4.metadata import PagedIndexerMetadata
+from sglang.srt.layers.deep_gemm_wrapper.configurer import DEEPGEMM_CAPS
 from sglang.srt.layers.linear import ReplicatedLinear
 from sglang.srt.state_capturer.indexer_topk import get_global_indexer_capturer
 from sglang.srt.utils import add_prefix, is_hip
@@ -373,18 +375,33 @@ class C4IndexerBackendMixin:
         )
         assert len(weights.shape) == 3
         weights = weights.squeeze(2)
-        if envs.SGLANG_OPT_USE_TILELANG_INDEXER.get():
+        cap = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+        has_deep_gemm_caps = cap is not None and cap in DEEPGEMM_CAPS
+        force_tilelang = envs.SGLANG_OPT_USE_TILELANG_INDEXER.get()
+        force_torch = envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get()
+        auto_tilelang = (
+            "SGLANG_OPT_USE_TILELANG_INDEXER" not in os.environ
+            and "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH" not in os.environ
+            and not has_deep_gemm_caps
+        )
+
+        seq_lens_2d = True
+        if force_tilelang or auto_tilelang:
             from sglang.srt.layers.attention.dsv4.tilelang_kernel import (
                 tilelang_fp8_paged_mqa_logits as fn,
             )
-        elif envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get():
+            seq_lens_2d = False
+        elif force_torch:
             fn = fp8_paged_mqa_logits_torch
+            seq_lens_2d = False
         else:
             from deep_gemm import fp8_paged_mqa_logits as fn
 
         _c4sl = indexer_metadata.c4_seq_lens
-        if _c4sl.dim() == 1:
+        if seq_lens_2d and _c4sl.dim() == 1:
             _c4sl = _c4sl.unsqueeze(-1)
+        elif not seq_lens_2d and _c4sl.dim() == 2 and _c4sl.shape[-1] == 1:
+            _c4sl = _c4sl.squeeze(-1)
         logits = fn(
             q_fp8,
             c4_indexer_kv_cache,
