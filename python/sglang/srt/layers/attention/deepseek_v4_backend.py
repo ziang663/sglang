@@ -81,6 +81,13 @@ def _pad_last_dim(x: T, multiples_of: int = PAGE_INDEX_ALIGNED_SIZE) -> T:
 
 
 def _create_flashmla_metadata():
+    from sglang.srt.layers.attention.debug_flash_mla_adapter import (
+        should_use_triton_fallback,
+    )
+
+    if should_use_triton_fallback():
+        return None
+
     import flash_mla
 
     return flash_mla.get_mla_metadata()[0]
@@ -1031,9 +1038,12 @@ class DeepseekV4AttnBackend(
                     extra_indices.shape[-1] % 64 == 0
                 ), f"{extra_indices.shape=}'s last dimension is not aligned to 64"
 
-            import flash_mla
+            from sglang.srt.layers.attention.debug_flash_mla_adapter import (
+                flash_mla_with_kvcache_entrypoint,
+            )
 
-            o = flash_mla.flash_mla_with_kvcache(
+            o = flash_mla_with_kvcache_entrypoint(
+                backend="kernel",
                 q=q,
                 k_cache=swa_k_cache,
                 head_dim_v=self.head_dim_v,

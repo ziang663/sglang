@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import warnings
+import os
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 
 from sglang.srt.environ import envs
+from sglang.srt.layers.deep_gemm_wrapper.configurer import DEEPGEMM_CAPS
 from sglang.srt.utils import is_hip
 
 if TYPE_CHECKING:
@@ -103,7 +105,13 @@ class PagedIndexerMetadata:
     topk_metadata: torch.Tensor = field(init=False, repr=False)
 
     def __post_init__(self):
-        if envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get():
+        cap = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+        has_deep_gemm_caps = cap is not None and cap in DEEPGEMM_CAPS
+        use_torch_metadata = envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get() or (
+            "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH" not in os.environ
+            and not has_deep_gemm_caps
+        )
+        if use_torch_metadata:
             self.deep_gemm_metadata = None
         else:
             import deep_gemm
