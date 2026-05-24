@@ -2,6 +2,7 @@ FROM nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ARG DEEPGEMM_PR318_COMMIT=7a7a41a1bac7dacabe74057e7600e59f98f85bce
+ARG FLASHINFER_SM120_COMMIT=c9ce444351052385828d607e57d78dfb65ac868e
 
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -45,12 +46,21 @@ ENV CUDA_HOME=/usr/local/cuda \
     SGLANG_OPT_DEEPGEMM_HC_PRENORM=1 \
     SGLANG_OPT_USE_JIT_INDEXER_METADATA=0 \
     SGLANG_V4_TRITON_SM120_TILE=auto \
+    SGLANG_DSV4_FLASHINFER_SM120=1 \
+    FLASHINFER_DISABLE_VERSION_CHECK=1 \
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024 \
     PATH=/usr/local/cuda/bin:/usr/local/nvidia/bin:/root/.local/bin:${PATH} \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
 RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install -e /workspace/sglang/python
+
+RUN git clone --recursive https://github.com/lucifer1004/flashinfer.git /tmp/flashinfer \
+    && cd /tmp/flashinfer \
+    && git checkout "${FLASHINFER_SM120_COMMIT}" \
+    && git apply /workspace/sglang/docker/flashinfer-sm120-dsv4-pbs256.patch \
+    && python3 -m pip install --no-build-isolation --force-reinstall --no-deps . \
+    && rm -rf /tmp/flashinfer /root/.cache/pip
 
 RUN git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git /tmp/DeepGEMM \
     && cd /tmp/DeepGEMM \

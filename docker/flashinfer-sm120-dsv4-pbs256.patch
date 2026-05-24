@@ -1,0 +1,237 @@
+diff --git a/csrc/sparse_mla_sm120_prefill.cu b/csrc/sparse_mla_sm120_prefill.cu
+index c674f788..eac73457 100644
+--- a/csrc/sparse_mla_sm120_prefill.cu
++++ b/csrc/sparse_mla_sm120_prefill.cu
+@@ -202,13 +202,13 @@ inline bool dispatch_v32(int num_heads, int topk, const bf16* Q, const uint8_t*
+ #undef DISPATCH_DSV3_2_MG
+ }
+ 
+-inline bool dispatch_dsv4_single(int num_heads, int topk, const bf16* Q, const uint8_t* KV,
+-                                 const int32_t* indices, const float* attn_sink, bf16* output,
+-                                 float* out_lse, float sm_scale, int num_tokens,
+-                                 size_t stride_kv_block, const int* topk_length_ptr,
+-                                 cudaStream_t stream) {
+-#define DISPATCH_MG_CM(CM, NH, TK, NHG)                                                  \
+-  launch_prefill_mg<ModelType::DSV4, ComputeMode::CM, NH, TK, 64, NHG>(                  \
++inline bool dispatch_dsv4_single(int num_heads, int topk, int page_block_size,
++                                 const bf16* Q, const uint8_t* KV, const int32_t* indices,
++                                 const float* attn_sink, bf16* output, float* out_lse,
++                                 float sm_scale, int num_tokens, size_t stride_kv_block,
++                                 const int* topk_length_ptr, cudaStream_t stream) {
++#define DISPATCH_MG_CM(CM, NH, TK, PBS, NHG)                                             \
++  launch_prefill_mg<ModelType::DSV4, ComputeMode::CM, NH, TK, PBS, NHG>(                 \
+       Q, KV, indices, attn_sink, output, out_lse, sm_scale, num_tokens, stride_kv_block, \
+       topk_length_ptr, stream)
+ 
+@@ -221,88 +221,126 @@ inline bool dispatch_dsv4_single(int num_heads, int topk, const bf16* Q, const u
+ // q_nope_bf16 / w_fp8 union or add a per-iter barrier) and drop the NH=16
+ // MG fallback so SG can serve all NH ≤ HPB shapes without the smem-waste
+ // MG_N_HG_T=1 layout incurs.
+-#define DISPATCH_BY_NH_CM(CM, TK)       \
+-  do {                                  \
+-    switch (num_heads) {                \
+-      case 16:                          \
+-        DISPATCH_MG_CM(CM, 16, TK, 1);  \
+-        return true;                    \
+-      case 32:                          \
+-        DISPATCH_MG_CM(CM, 32, TK, 2);  \
+-        return true;                    \
+-      case 64:                          \
+-        DISPATCH_MG_CM(CM, 64, TK, 2);  \
+-        return true;                    \
+-      case 128:                         \
+-        DISPATCH_MG_CM(CM, 128, TK, 2); \
+-        return true;                    \
+-      default:                          \
+-        return false;                   \
+-    }                                   \
++#define DISPATCH_BY_NH_CM(CM, TK, PBS)       \
++  do {                                       \
++    switch (num_heads) {                     \
++      case 16:                               \
++        DISPATCH_MG_CM(CM, 16, TK, PBS, 1);  \
++        return true;                         \
++      case 32:                               \
++        DISPATCH_MG_CM(CM, 32, TK, PBS, 2);  \
++        return true;                         \
++      case 64:                               \
++        DISPATCH_MG_CM(CM, 64, TK, PBS, 2);  \
++        return true;                         \
++      case 128:                              \
++        DISPATCH_MG_CM(CM, 128, TK, PBS, 2); \
++        return true;                         \
++      default:                               \
++        return false;                        \
++    }                                        \
+   } while (0)
+ 
++  if (page_block_size != 64 && page_block_size != 128 && page_block_size != 256) return false;
++
+   // Small K-loop: BF16 QK skips the FP8 Q-quantize prologue. Larger K
+   // amortises FP8's higher Tensor-Core throughput.
+-  if (topk == 128)
+-    DISPATCH_BY_NH_CM(BF16, 128);
+-  else if (topk == 512)
+-    DISPATCH_BY_NH_CM(FP8, 512);
+-  else if (topk == 1024)
+-    DISPATCH_BY_NH_CM(FP8, 1024);
+-  else if (topk == 2048)
+-    DISPATCH_BY_NH_CM(FP8, 2048);
+-  else
+-    return false;
++  if (page_block_size == 64) {
++    if (topk == 128)
++      DISPATCH_BY_NH_CM(BF16, 128, 64);
++    else if (topk == 512)
++      DISPATCH_BY_NH_CM(FP8, 512, 64);
++    else if (topk == 1024)
++      DISPATCH_BY_NH_CM(FP8, 1024, 64);
++    else if (topk == 2048)
++      DISPATCH_BY_NH_CM(FP8, 2048, 64);
++    else
++      return false;
++  } else {
++    if (page_block_size == 128 && topk == 128)
++      DISPATCH_BY_NH_CM(BF16, 128, 128);
++    else if (page_block_size == 128 && topk == 512)
++      DISPATCH_BY_NH_CM(FP8, 512, 128);
++    else if (page_block_size == 128 && topk == 1024)
++      DISPATCH_BY_NH_CM(FP8, 1024, 128);
++    else if (page_block_size == 128 && topk == 2048)
++      DISPATCH_BY_NH_CM(FP8, 2048, 128);
++    else if (page_block_size == 256 && topk == 128)
++      DISPATCH_BY_NH_CM(BF16, 128, 256);
++    else if (page_block_size == 256 && topk == 512)
++      DISPATCH_BY_NH_CM(FP8, 512, 256);
++    else if (page_block_size == 256 && topk == 1024)
++      DISPATCH_BY_NH_CM(FP8, 1024, 256);
++    else if (page_block_size == 256 && topk == 2048)
++      DISPATCH_BY_NH_CM(FP8, 2048, 256);
++    else
++      return false;
++  }
+ 
+ #undef DISPATCH_BY_NH_CM
+ #undef DISPATCH_MG_CM
+   return false;  // unreachable
+ }
+ 
+-inline bool dispatch_dsv4_dual(int num_heads, int topk, int topk_extra, int extra_page_block_size,
+-                               const bf16* Q, const uint8_t* KV, const int32_t* indices,
+-                               const uint8_t* KV_extra, const int32_t* idx_extra,
+-                               const float* attn_sink, bf16* output, float* out_lse, float sm_scale,
+-                               int num_tokens, size_t stride_kv_block, size_t stride_kv_block_extra,
++inline bool dispatch_dsv4_dual(int num_heads, int topk, int page_block_size, int topk_extra,
++                               int extra_page_block_size, const bf16* Q, const uint8_t* KV,
++                               const int32_t* indices, const uint8_t* KV_extra,
++                               const int32_t* idx_extra, const float* attn_sink, bf16* output,
++                               float* out_lse, float sm_scale, int num_tokens,
++                               size_t stride_kv_block, size_t stride_kv_block_extra,
+                                const int* topk_length_ptr, const int* topk_length_extra_ptr,
+                                cudaStream_t stream) {
+ // topk_extra is runtime — no enumeration by value. Only extra_page_block_size
+ // stays template (C4A: pbs=64, C128A: pbs=2). NH=16 uses MG_N_HG_T=1; SG has
+ // no dual-cache support.
+-#define DISPATCH_DUAL_MG_CM(CM, NH, TK, PBSX, NHG)                                                \
+-  launch_prefill_mg_dual<ModelType::DSV4, ComputeMode::CM, NH, TK, 64, PBSX, NHG>(                \
++#define DISPATCH_DUAL_MG_CM(CM, NH, TK, PBS, PBSX, NHG)                                           \
++  launch_prefill_mg_dual<ModelType::DSV4, ComputeMode::CM, NH, TK, PBS, PBSX, NHG>(               \
+       Q, KV, indices, KV_extra, idx_extra, attn_sink, output, out_lse, sm_scale, num_tokens,      \
+       topk_extra, stride_kv_block, stride_kv_block_extra, topk_length_ptr, topk_length_extra_ptr, \
+       stream)
+ 
+-#define DISPATCH_BY_NH_PBSX(PBSX)                     \
+-  do {                                                \
+-    switch (num_heads) {                              \
+-      case 16:                                        \
+-        DISPATCH_DUAL_MG_CM(BF16, 16, 128, PBSX, 1);  \
+-        return true;                                  \
+-      case 32:                                        \
+-        DISPATCH_DUAL_MG_CM(BF16, 32, 128, PBSX, 2);  \
+-        return true;                                  \
+-      case 64:                                        \
+-        DISPATCH_DUAL_MG_CM(BF16, 64, 128, PBSX, 2);  \
+-        return true;                                  \
+-      case 128:                                       \
+-        DISPATCH_DUAL_MG_CM(BF16, 128, 128, PBSX, 2); \
+-        return true;                                  \
+-      default:                                        \
+-        return false;                                 \
+-    }                                                 \
++#define DISPATCH_BY_NH_PBS(PBS, PBSX)                     \
++  do {                                                    \
++    switch (num_heads) {                                  \
++      case 16:                                            \
++        DISPATCH_DUAL_MG_CM(BF16, 16, 128, PBS, PBSX, 1);  \
++        return true;                                      \
++      case 32:                                            \
++        DISPATCH_DUAL_MG_CM(BF16, 32, 128, PBS, PBSX, 2);  \
++        return true;                                      \
++      case 64:                                            \
++        DISPATCH_DUAL_MG_CM(BF16, 64, 128, PBS, PBSX, 2);  \
++        return true;                                      \
++      case 128:                                           \
++        DISPATCH_DUAL_MG_CM(BF16, 128, 128, PBS, PBSX, 2); \
++        return true;                                      \
++      default:                                            \
++        return false;                                     \
++    }                                                     \
+   } while (0)
+ 
+   if (topk != 128) return false;
+-  if (extra_page_block_size == 64) {
+-    DISPATCH_BY_NH_PBSX(64);
+-  } else if (extra_page_block_size == 2) {
+-    DISPATCH_BY_NH_PBSX(2);
++  if (page_block_size == 64) {
++    if (extra_page_block_size == 64) {
++      DISPATCH_BY_NH_PBS(64, 64);
++    } else if (extra_page_block_size == 2) {
++      DISPATCH_BY_NH_PBS(64, 2);
++    }
++  } else if (page_block_size == 128) {
++    if (extra_page_block_size == 64) {
++      DISPATCH_BY_NH_PBS(128, 64);
++    } else if (extra_page_block_size == 2) {
++      DISPATCH_BY_NH_PBS(128, 2);
++    }
++  } else if (page_block_size == 256) {
++    if (extra_page_block_size == 64) {
++      DISPATCH_BY_NH_PBS(256, 64);
++    } else if (extra_page_block_size == 2) {
++      DISPATCH_BY_NH_PBS(256, 2);
++    }
+   }
+   return false;
+-#undef DISPATCH_BY_NH_PBSX
++#undef DISPATCH_BY_NH_PBS
+ #undef DISPATCH_DUAL_MG_CM
+ }
+ 
+@@ -325,10 +363,10 @@ bool sparse_mla_prefill_dispatch(ModelType mt, int num_heads, int topk, int page
+ 
+   if (extra_KV_cache != nullptr) {
+     if (mt != ModelType::DSV4) return false;
+-    return dispatch_dsv4_dual(num_heads, topk, topk_extra, extra_page_block_size, Q, KV_cache,
+-                              indices, extra_KV_cache, extra_indices, attn_sink, output, out_lse,
+-                              sm_scale, num_tokens, stride_kv_block, stride_kv_block_extra,
+-                              topk_length, extra_topk_length, stream);
++    return dispatch_dsv4_dual(num_heads, topk, page_block_size, topk_extra, extra_page_block_size,
++                              Q, KV_cache, indices, extra_KV_cache, extra_indices, attn_sink,
++                              output, out_lse, sm_scale, num_tokens, stride_kv_block,
++                              stride_kv_block_extra, topk_length, extra_topk_length, stream);
+   }
+ 
+   switch (mt) {
+@@ -336,8 +374,9 @@ bool sparse_mla_prefill_dispatch(ModelType mt, int num_heads, int topk, int page
+       return dispatch_v32(num_heads, topk, Q, KV_cache, indices, attn_sink, output, out_lse,
+                           sm_scale, num_tokens, stride_kv_block, topk_length, stream);
+     case ModelType::DSV4:
+-      return dispatch_dsv4_single(num_heads, topk, Q, KV_cache, indices, attn_sink, output, out_lse,
+-                                  sm_scale, num_tokens, stride_kv_block, topk_length, stream);
++      return dispatch_dsv4_single(num_heads, topk, page_block_size, Q, KV_cache, indices,
++                                  attn_sink, output, out_lse, sm_scale, num_tokens,
++                                  stride_kv_block, topk_length, stream);
+   }
+   return false;
+ }
