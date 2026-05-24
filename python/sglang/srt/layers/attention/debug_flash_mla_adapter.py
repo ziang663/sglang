@@ -15,6 +15,7 @@
 # layout on non-Hopper arches, so the fallback has to live next to the
 # entrypoint.
 import functools
+import os
 from typing import Any, Tuple
 
 import torch
@@ -127,8 +128,136 @@ def _v4_triton_decode_dispatch(
     return (out.unsqueeze(1), None)
 
 
+@functools.lru_cache(maxsize=16)
+def _get_flashinfer_sm120_wrapper(
+    max_num_tokens: int,
+    max_num_heads: int,
+    d_v: int,
+    device_index: int,
+):
+    import flashinfer
+
+    return flashinfer.BatchSparseMLAPagedAttentionWrapper(
+        max_num_tokens=max_num_tokens,
+        max_num_heads=max_num_heads,
+        d_v=d_v,
+        device=torch.device("cuda", device_index),
+    )
+
+
+def _v4_flashinfer_sm120_dispatch(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    head_dim_v: int,
+    softmax_scale: float,
+    is_fp8_kvcache: bool,
+    indices: torch.Tensor,
+    topk_length: torch.Tensor,
+    attn_sink: torch.Tensor,
+    extra_k_cache: torch.Tensor | None = None,
+    extra_indices_in_kvcache: torch.Tensor | None = None,
+    extra_topk_length: torch.Tensor | None = None,
+    **_unused: Any,
+) -> Tuple[torch.Tensor, None]:
+    """Run DeepSeek V4 sparse MLA through FlashInfer's SM120 backend.
+
+    This targets flashinfer-ai/flashinfer PR #3395. Keep the Triton fallback
+    available because the PR is not merged yet and only supports SM120/SM121.
+    """
+    assert is_fp8_kvcache, "FlashInfer SM120 V4 path only handles FP8 KV cache"
+    assert head_dim_v == 512, f"V4 head_dim_v must be 512, got {head_dim_v}"
+
+    q_3d = q.squeeze(1) if q.ndim == 4 else q
+    num_tokens, num_heads, _ = q_3d.shape
+    out = torch.empty(
+        (num_tokens, num_heads, head_dim_v),
+        dtype=torch.bfloat16,
+        device=q_3d.device,
+    )
+    if num_tokens == 0:
+        return (out.unsqueeze(1), None)
+
+    swa_cache = k_cache
+    if swa_cache.dtype != torch.uint8:
+        swa_cache = swa_cache.view(torch.uint8)
+    if extra_k_cache is not None and extra_k_cache.dtype != torch.uint8:
+        extra_k_cache = extra_k_cache.view(torch.uint8)
+
+    if indices.ndim == 3:
+        indices = indices.squeeze(1)
+    if extra_indices_in_kvcache is not None and extra_indices_in_kvcache.ndim == 3:
+        extra_indices_in_kvcache = extra_indices_in_kvcache.squeeze(1)
+
+    # PR #3395's decode-dsv4 path only instantiates selected (num_heads, topk)
+    # pairs. SGLang may hit smaller decode/cuda-graph shapes, so keep those on
+    # the existing Triton fallback. The long-prefill path (num_tokens > 64) is
+    # the throughput bottleneck we want FlashInfer to cover.
+    if num_tokens <= 64:
+        return _v4_triton_decode_dispatch(
+            q=q,
+            k_cache=k_cache,
+            head_dim_v=head_dim_v,
+            softmax_scale=softmax_scale,
+            is_fp8_kvcache=is_fp8_kvcache,
+            indices=indices,
+            topk_length=topk_length,
+            attn_sink=attn_sink,
+            extra_k_cache=extra_k_cache,
+            extra_indices_in_kvcache=extra_indices_in_kvcache,
+            extra_topk_length=extra_topk_length,
+        )
+
+    swa_lens = topk_length.reshape(-1)[:num_tokens].contiguous()
+    extra_lens = (
+        extra_topk_length.reshape(-1)[:num_tokens].contiguous()
+        if extra_topk_length is not None
+        else None
+    )
+
+    wrapper = _get_flashinfer_sm120_wrapper(
+        num_tokens,
+        num_heads,
+        head_dim_v,
+        q_3d.device.index if q_3d.device.index is not None else torch.cuda.current_device(),
+    )
+    wrapper.run(
+        q_3d if q_3d.dtype == torch.bfloat16 else q_3d.to(torch.bfloat16),
+        swa_cache,
+        indices,
+        out,
+        float(softmax_scale),
+        topk_length=swa_lens,
+        attn_sink=attn_sink,
+        extra_kv_cache=extra_k_cache,
+        extra_indices=extra_indices_in_kvcache,
+        extra_topk_length=extra_lens,
+    )
+    return (out.unsqueeze(1), None)
+
+
+def _should_use_flashinfer_sm120() -> bool:
+    if os.environ.get("SGLANG_DSV4_FLASHINFER_SM120", "1").lower() in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }:
+        return False
+    return _device_capability() in {(12, 0), (12, 1)}
+
+
 def flash_mla_with_kvcache_entrypoint(backend: str, **kwargs):
     if backend == "kernel":
+        if _should_use_flashinfer_sm120():
+            try:
+                return _v4_flashinfer_sm120_dispatch(**kwargs)
+            except Exception:
+                if os.environ.get(
+                    "SGLANG_DSV4_FLASHINFER_SM120_STRICT", "0"
+                ).lower() in {"1", "true", "on", "yes"}:
+                    raise
+                return _v4_triton_decode_dispatch(**kwargs)
+
         # Auto-fall back on architectures the upstream CUDA kernel does not
         # cover. Set SGLANG_FLASHMLA_BACKEND_OVERRIDE=triton to force-bypass even
         # on supported arches (useful for numerical comparison).

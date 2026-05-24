@@ -58,6 +58,7 @@ class SchedulerProfilerMixin:
         self.profiler_target_decode_ct: Optional[int] = None
 
         self.profile_by_stage: bool = False
+        self.profile_stages: Optional[List[str]] = None
         self.profile_in_progress: bool = False
         self.merge_profiles = False
 
@@ -100,6 +101,7 @@ class SchedulerProfilerMixin:
             )
 
         self.profile_by_stage = profile_by_stage
+        self.profile_stages = profile_stages
         self.merge_profiles = merge_profiles
 
         if output_dir is None:
@@ -117,13 +119,17 @@ class SchedulerProfilerMixin:
         if start_step:
             self.profiler_start_forward_ct = max(start_step, self.forward_ct + 1)
 
-        if num_steps:
-            if self.profile_by_stage:
-                self.profiler_prefill_ct = 0
-                self.profiler_decode_ct = 0
+        if self.profile_by_stage:
+            self.profiler_prefill_ct = 0
+            self.profiler_decode_ct = 0
+            if num_steps:
                 self.profiler_target_prefill_ct = num_steps
                 self.profiler_target_decode_ct = num_steps
-            elif start_step:
+            else:
+                self.profiler_target_prefill_ct = None
+                self.profiler_target_decode_ct = None
+        elif num_steps:
+            if start_step:
                 self.profiler_target_forward_ct = (
                     self.profiler_start_forward_ct + num_steps
                 )
@@ -343,10 +349,15 @@ class SchedulerProfilerMixin:
 
         if self.profile_by_stage:
             if batch.forward_mode.is_prefill():
+                if self.profile_stages and "prefill" not in self.profile_stages:
+                    return
                 if self.profiler_prefill_ct == 0:
                     self.start_profile(batch.forward_mode)
                 self.profiler_prefill_ct += 1
-                if self.profiler_prefill_ct > self.profiler_target_prefill_ct:
+                if (
+                    self.profiler_target_prefill_ct is not None
+                    and self.profiler_prefill_ct > self.profiler_target_prefill_ct
+                ):
                     if self.profile_in_progress:
                         self.stop_profile(stage=ForwardMode.EXTEND)
             elif batch.forward_mode.is_decode():
@@ -354,9 +365,14 @@ class SchedulerProfilerMixin:
                     if self.profile_in_progress:
                         # force trace flush
                         self.stop_profile(stage=ForwardMode.EXTEND)
+                    if self.profile_stages and "decode" not in self.profile_stages:
+                        return
                     self.start_profile(batch.forward_mode)
                 self.profiler_decode_ct += 1
-                if self.profiler_decode_ct > self.profiler_target_decode_ct:
+                if (
+                    self.profiler_target_decode_ct is not None
+                    and self.profiler_decode_ct > self.profiler_target_decode_ct
+                ):
                     if self.profile_in_progress:
                         self.stop_profile(stage=ForwardMode.DECODE)
             elif batch.forward_mode.is_idle():

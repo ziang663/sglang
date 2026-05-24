@@ -8,6 +8,8 @@
 # unavailable (notably SM_120 / RTX 5090).
 """Triton fallback for DeepSeek V4 sparse FP8 MLA decode."""
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -19,6 +21,22 @@ FP8_DS_MLA_FP8_DIM = 448
 FP8_DS_MLA_SCALE_GROUP = 64
 FP8_DS_MLA_SCALE_BYTES = 8
 FP8_DS_MLA_TOKEN_BYTES = 576
+
+
+def _get_triton_attn_tile() -> tuple[int, int]:
+    tile = os.environ.get("SGLANG_V4_TRITON_ATTN_TILE", "8x16").strip().lower()
+    presets = {
+        "4x16": (4, 16),
+        "4x32": (4, 32),
+        "8x16": (8, 16),
+        "8x32": (8, 32),
+    }
+    if tile not in presets:
+        raise ValueError(
+            "SGLANG_V4_TRITON_ATTN_TILE must be one of "
+            f"{sorted(presets)}, got {tile!r}"
+        )
+    return presets[tile]
 
 
 @triton.jit
@@ -257,7 +275,8 @@ def decode_sparse_attention_triton(
     assert extra_cache is not None
     assert extra_indices is not None
     assert extra_lens is not None
-    grid = (num_tokens, triton.cdiv(num_heads, 8))
+    block_h, block_n = _get_triton_attn_tile()
+    grid = (num_tokens, triton.cdiv(num_heads, block_h))
     _decode_sparse_attention_fp8_kernel[grid](
         q,
         swa_cache.view(torch.float8_e4m3fn),
@@ -293,8 +312,8 @@ def decode_sparse_attention_triton(
         out.stride(0),
         out.stride(1),
         out.stride(2),
-        BLOCK_H=8,
-        BLOCK_N=16,
+        BLOCK_H=block_h,
+        BLOCK_N=block_n,
         BLOCK_D=DEEPSEEK_V4_MLA_HEAD_DIM,
         FP8_DIM=FP8_DS_MLA_FP8_DIM,
         SCALE_GROUP=FP8_DS_MLA_SCALE_GROUP,
