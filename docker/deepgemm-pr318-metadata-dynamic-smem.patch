@@ -1,0 +1,69 @@
+diff --git a/csrc/jit_kernels/impls/smxx_fp8_fp4_paged_mqa_logits.hpp b/csrc/jit_kernels/impls/smxx_fp8_fp4_paged_mqa_logits.hpp
+index 98d2855..14d3736 100644
+--- a/csrc/jit_kernels/impls/smxx_fp8_fp4_paged_mqa_logits.hpp
++++ b/csrc/jit_kernels/impls/smxx_fp8_fp4_paged_mqa_logits.hpp
+@@ -63,7 +63,8 @@ static void smxx_paged_mqa_logits_metadata(const torch::Tensor& context_lens,
+     const int aligned_batch_size = align(batch_size, 32);
+     DG_HOST_ASSERT(split_kv % block_kv == 0);
+ 
+-    // Shared memory: prefix_sum[kAlignedBatchSize] + varlen_atom_token_start/context_len[kAlignedBatchSize] + varlen_num_atoms
++    // Dynamic shared memory: prefix_sum[kAlignedBatchSize] +
++    // varlen_atom_token_start/context_len[kAlignedBatchSize] + varlen_num_atoms.
+     const int smem_size = (3 * aligned_batch_size + 1) * static_cast<int>(sizeof(int));
+     DG_HOST_ASSERT(smem_size <= SM90ArchSpec::smem_capacity);
+     DG_HOST_ASSERT(smem_size <= SM100ArchSpec::smem_capacity);
+diff --git a/csrc/jit_kernels/impls/smxx_fp8_paged_mqa_logits.hpp b/csrc/jit_kernels/impls/smxx_fp8_paged_mqa_logits.hpp
+index 1240aad..09673f3 100644
+--- a/csrc/jit_kernels/impls/smxx_fp8_paged_mqa_logits.hpp
++++ b/csrc/jit_kernels/impls/smxx_fp8_paged_mqa_logits.hpp
+@@ -61,8 +61,8 @@ static void smxx_paged_mqa_logits_metadata(const torch::Tensor& context_lens,
+     const int aligned_batch_size = align(batch_size, 32);
+     const int split_kv = block_kv * num_math_warpgroups;
+     
+-    // Calculate shared memory size
+-    const int smem_size = aligned_batch_size * static_cast<int>(sizeof(int));
++    // Dynamic shared memory used by smxx_paged_mqa_logits_metadata.
++    const int smem_size = (3 * aligned_batch_size + 1) * static_cast<int>(sizeof(int));
+     DG_HOST_ASSERT(smem_size <= SM90ArchSpec::smem_capacity);
+     DG_HOST_ASSERT(smem_size <= SM100ArchSpec::smem_capacity);
+ 
+diff --git a/deep_gemm/include/deep_gemm/scheduler/paged_mqa_logits.cuh b/deep_gemm/include/deep_gemm/scheduler/paged_mqa_logits.cuh
+index 548bbbc..67f4b6b 100644
+--- a/deep_gemm/include/deep_gemm/scheduler/paged_mqa_logits.cuh
++++ b/deep_gemm/include/deep_gemm/scheduler/paged_mqa_logits.cuh
+@@ -16,9 +16,11 @@ void smxx_paged_mqa_logits_metadata(const uint32_t batch_size, const uint32_t ne
+     // Wait for primary kernel completion
+     cudaGridDependencySynchronize();
+ 
+-    __shared__ uint32_t varlen_atom_token_start[kAlignedBatchSize];
+-    __shared__ uint32_t varlen_atom_context_len[kAlignedBatchSize];
+-    __shared__ uint32_t varlen_num_atoms_shared;
++    extern __shared__ uint32_t smem[];
++    uint32_t* varlen_atom_token_start = smem;
++    uint32_t* varlen_atom_context_len = varlen_atom_token_start + kAlignedBatchSize;
++    uint32_t* prefix_sum = varlen_atom_context_len + kAlignedBatchSize;
++    uint32_t* varlen_num_atoms_shared = prefix_sum + kAlignedBatchSize;
+     uint32_t num_items;
+ 
+     if constexpr (kIsVarlen) {
+@@ -31,10 +33,10 @@ void smxx_paged_mqa_logits_metadata(const uint32_t batch_size, const uint32_t ne
+                 t += is_paired ? 2 : 1;
+                 ++ atom_count;
+             }
+-            varlen_num_atoms_shared = atom_count;
++            *varlen_num_atoms_shared = atom_count;
+         }
+         __syncwarp();
+-        num_items = varlen_num_atoms_shared;
++        num_items = *varlen_num_atoms_shared;
+     } else {
+         num_items = batch_size;
+     }
+@@ -54,7 +56,6 @@ void smxx_paged_mqa_logits_metadata(const uint32_t batch_size, const uint32_t ne
+         num_segs[k] = math::ceil_div(context_len, SPLIT_KV);
+     }
+ 
+-    __shared__ uint32_t prefix_sum[kAlignedBatchSize];
+     uint32_t sum = 0;
+     #pragma unroll
+     for (uint32_t k = 0; k < kAlignedBatchSize / 32; ++ k) {

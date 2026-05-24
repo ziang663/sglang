@@ -263,7 +263,35 @@ def _patch_strided_mxfp():
         import sglang.srt.third_party.triton_kernels_v0321.matmul_ogs_details.opt_flags as _of
         if hasattr(_of, "has_native_mxfp"):
             _of.has_native_mxfp = target_info.has_native_mxfp
-        _of.update_opt_flags_constraints({"is_persistent": False})
+        constraints = {"is_persistent": False}
+        if torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0):
+            # Optional hard override for RTX 5090 / SM120 experiments. The
+            # normal path now uses an automatic simulated-MXFP heuristic in
+            # opt_flags.py, which keeps decode-small-M and prefill-large-M tiles
+            # separate. Use this env only when deliberately sweeping tile tuples.
+            tile_spec = os.environ.get("SGLANG_V4_TRITON_SM120_TILE", "auto").strip()
+            if tile_spec.lower() == "auto":
+                pass
+            elif tile_spec and tile_spec.lower() not in ("0", "false", "off"):
+                try:
+                    block_m, block_n, block_k = [
+                        int(x.strip()) for x in tile_spec.split(",")
+                    ]
+                    constraints.update(
+                        {
+                            "block_m": block_m,
+                            "block_n": block_n,
+                            "block_k": block_k,
+                        }
+                    )
+                except Exception as exc:
+                    raise ValueError(
+                        "SGLANG_V4_TRITON_SM120_TILE must be "
+                        "'block_m,block_n,block_k', e.g. '64,128,128', "
+                        f"got {tile_spec!r}"
+                    ) from exc
+
+        _of.update_opt_flags_constraints(constraints)
 
         if (
             hasattr(_of, "make_default_opt_flags_nvidia")

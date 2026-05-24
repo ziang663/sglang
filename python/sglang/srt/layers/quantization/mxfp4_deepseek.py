@@ -268,6 +268,74 @@ class DeepSeekMxfp4MoEMethod:
         if getattr(layer, "_mega_moe_weights_built", False):
             return
 
+        # Experimental SM120 path through FlashInfer B12x W4A16. This is
+        # opt-in because FlashInfer 0.6.11's public B12x API does not expose
+        # DeepSeek-V4's asymmetric SwiGLU clamp. The current DeepSeek-V4-Flash
+        # config has swiglu_limit=10.0, so correctness-preserving runs must
+        # stay on the triton_kernels path until the B12x kernel grows clamp
+        # support. `SGLANG_V4_B12X_IGNORE_SWIGLU_LIMIT=1` exists for profiling
+        # the native SM120 FP4 path only.
+        try:
+            from sglang.srt.layers.quantization.v4_flashinfer_b12x_moe import (
+                b12x_supported,
+                convert_v4_weights_to_b12x,
+                ignore_b12x_swiglu_limit,
+                use_v4_b12x_moe,
+            )
+        except Exception:
+            b12x_supported = lambda: False
+            convert_v4_weights_to_b12x = None
+            ignore_b12x_swiglu_limit = lambda: False
+            use_v4_b12x_moe = lambda: False
+
+        if use_v4_b12x_moe():
+            if not b12x_supported():
+                raise RuntimeError("SGLANG_V4_USE_B12X_MOE=1 requires SM120/SM121.")
+            if (
+                self.moe_runner_config.swiglu_limit is not None
+                and not ignore_b12x_swiglu_limit()
+            ):
+                raise RuntimeError(
+                    "SGLANG_V4_USE_B12X_MOE=1 was requested, but this "
+                    "DeepSeek-V4 config uses swiglu_limit="
+                    f"{self.moe_runner_config.swiglu_limit}. FlashInfer B12x "
+                    "0.6.11 does not implement that asymmetric clamp. Set "
+                    "SGLANG_V4_B12X_IGNORE_SWIGLU_LIMIT=1 only for performance "
+                    "profiling with known accuracy drift."
+                )
+
+            w13_raw = layer.w13_weight.data
+            w2_raw = layer.w2_weight.data
+            w13_scale_raw = layer.w13_weight_scale_inv.data
+            w2_scale_raw = layer.w2_weight_scale_inv.data
+
+            hidden_size_b12x = w13_raw.shape[2] * 2
+            intermediate_size_b12x = w2_raw.shape[2] * 2
+            log_info_on_rank0(
+                logger,
+                f"[v4-b12x] Converting V4 MXFP4 weights to FlashInfer B12x "
+                f"W4A16 layout (layer: {self.prefix}, "
+                f"hidden_size={hidden_size_b12x}, "
+                f"intermediate_size={intermediate_size_b12x})...",
+            )
+            (
+                layer._v4_b12x_w13,
+                layer._v4_b12x_w13_scale,
+                layer._v4_b12x_w1_alpha,
+                layer._v4_b12x_w2,
+                layer._v4_b12x_w2_scale,
+                layer._v4_b12x_w2_alpha,
+            ) = convert_v4_weights_to_b12x(
+                w13_raw, w13_scale_raw, w2_raw, w2_scale_raw
+            )
+            del layer.w13_weight
+            del layer.w2_weight
+            del layer.w13_weight_scale_inv
+            del layer.w2_weight_scale_inv
+            layer._v4_b12x_num_experts = w13_raw.shape[0]
+            layer._v4_b12x_path = True
+            return
+
         # V4 GPU MoE dispatch (capability-driven, env override available).
         #
         # Default: capability in `_TRTLLM_FP4_CAPS` -> trtllm path below;
@@ -464,6 +532,46 @@ class DeepSeekMxfp4MoEMethod:
 
         hidden_states = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
+
+        # Experimental native SM120 FP4 path via FlashInfer B12x W4A16.
+        if getattr(layer, "_v4_b12x_path", False):
+            from sglang.srt.layers.quantization.v4_flashinfer_b12x_moe import (
+                apply_v4_b12x_moe,
+            )
+            if TopKOutputChecker.format_is_standard(topk_output):
+                topk_ids = topk_output.topk_ids
+                topk_weights = topk_output.topk_weights
+            elif TopKOutputChecker.format_is_hash(topk_output):
+                topk_ids = topk_output.topk_ids
+                topk_weights = topk_output.topk_weights
+            else:
+                raise NotImplementedError(
+                    f"B12x V4 path: unsupported topk format {topk_output.format}"
+                )
+            if not envs.SGLANG_OPT_MXFP4_SKIP_DISPATCHER_MAPPING.get():
+                local_expert_offset = layer.moe_ep_rank * layer.num_local_experts
+                topk_ids = torch.where(
+                    topk_ids >= 0,
+                    topk_ids + local_expert_offset,
+                    topk_ids,
+                )
+            output = apply_v4_b12x_moe(
+                hidden_states=hidden_states,
+                w13=layer._v4_b12x_w13,
+                w13_scale=layer._v4_b12x_w13_scale,
+                w1_alpha=layer._v4_b12x_w1_alpha,
+                w2=layer._v4_b12x_w2,
+                w2_scale=layer._v4_b12x_w2_scale,
+                w2_alpha=layer._v4_b12x_w2_alpha,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                num_experts=layer._v4_b12x_num_experts,
+            )
+            rsf = layer.moe_runner_config.routed_scaling_factor
+            if not envs.SGLANG_OPT_MXFP4_FUSE_RSF_SHARED_ADD.get():
+                if rsf is not None and rsf != 1.0:
+                    output.mul_(rsf)
+            return StandardCombineInput(hidden_states=output)
 
         # NEW (2026-04-29): V4 triton_kernels MoE path. Origin: sglang 本身.
         # Must dispatch before accessing layer.w13_weight (we deleted it
