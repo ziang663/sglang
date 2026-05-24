@@ -31,7 +31,7 @@ def compute_block_k(m: int, k: int | None, is_persistent: bool, lhs_dtype, rhs_d
     rhs_width = bitwidth(rhs_dtype)
     # block_k needs to match the cacheline size (1024 bits)
     block_k = int(1024 // min(lhs_width, rhs_width))
-    has_native_mxfp = target_info.cuda_capability_geq(10, 0)
+    has_native_mxfp = target_info.has_native_mxfp()
     if rhs_width == 4 and not has_native_mxfp:
         block_k = 128
     elif k is not None:
@@ -79,7 +79,7 @@ def compute_num_stages(
     stage_size = block_m * block_k * lhs_dtype.itemsize + block_k * block_n * weight_size
     device_props = torch.cuda.get_device_properties(0)
     smem_capacity = device_props.shared_memory_per_block_optin
-    has_native_mxfp = target_info.cuda_capability_geq(10, 0)
+    has_native_mxfp = target_info.has_native_mxfp()
     if has_native_mxfp and getattr(precision_config, "weight_scale", None) is not None:
         if rhs_dtype == FP4:
             # 4-bit e2m1 weights are padded 2x

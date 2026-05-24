@@ -5,6 +5,8 @@ import triton
 from sglang.srt.third_party.triton_kernels_v0321.target_info import get_cdna_version
 import torch
 from .opt_flags_details import opt_flags_amd, opt_flags_nvidia
+from sglang.srt.third_party.triton_kernels_v0321 import target_info
+from sglang.srt.third_party.triton_kernels_v0321.tensor import bitwidth
 
 
 @dataclass
@@ -143,7 +145,7 @@ def make_default_opt_flags_nvidia(
     epilogue_effective_itemsize,
     constraints,
 ):
-    constraints_supported = ["block_m", "block_k", "split_k", "is_persistent", "fused_scatter", "epilogue_subtile", "num_stages", "idle_sms"]
+    constraints_supported = ["block_m", "block_n", "block_k", "split_k", "is_persistent", "fused_scatter", "epilogue_subtile", "num_stages", "idle_sms"]
     assert not any([c not in constraints_supported for c in constraints]), constraints.keys()
     # tokens per expert
     if routing_data is None:
@@ -155,16 +157,31 @@ def make_default_opt_flags_nvidia(
     # pid swizzling
     group_m = 8
     xcd_swizzle = 1
+    is_simulated_mxfp4 = (
+        precision_config.weight_scale is not None
+        and bitwidth(rhs_dtype) == 4
+        and not target_info.has_native_mxfp()
+    )
+    prefer_large_m_simulated_mxfp4_tile = (
+        is_simulated_mxfp4 and tokens_per_expt >= 64
+    )
     # block_m
     if constraints.get("block_m", None):
         block_m = constraints["block_m"]
+    elif prefer_large_m_simulated_mxfp4_tile:
+        block_m = 64
     elif enforce_bitwise_invariance:
         block_m = 128
     else:
         block_m = max(16, min(triton.next_power_of_2(tokens_per_expt), 128))
     # block n
     arch = None
-    block_n = opt_flags_nvidia.compute_block_n(n, arch, precision_config)
+    if constraints.get("block_n", None) is not None:
+        block_n = constraints["block_n"]
+    elif prefer_large_m_simulated_mxfp4_tile:
+        block_n = 128
+    else:
+        block_n = opt_flags_nvidia.compute_block_n(n, arch, precision_config)
     # is_persistent
     grid_size = opt_flags_nvidia.compute_grid_size(routing_data, m, n, block_m, block_n)
     n_sms = torch.cuda.get_device_properties(0).multi_processor_count

@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_musa = is_musa()
 
-# DeepGEMM kernels are valid on Hopper and data-center Blackwell paths, but
-# not consumer Blackwell SM120. Importing deep_gemm can still succeed there,
-# so gate by capability before any kernel path is selected.
-DEEPGEMM_CAPS = {(9, 0), (10, 0), (10, 3)}
+# DeepGEMM kernels are valid on Hopper and data-center Blackwell paths.  DeepGEMM
+# PR318 adds experimental SM120 coverage for the DSv4 HC prenorm / paged MQA /
+# einsum kernels, so allow consumer Blackwell when that build is on PYTHONPATH.
+DEEPGEMM_CAPS = {(9, 0), (10, 0), (10, 3), (12, 0)}
 
 
 def _compute_enable_deep_gemm():
