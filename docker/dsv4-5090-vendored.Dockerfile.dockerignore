@@ -1,0 +1,16 @@
+*
+!sglang/
+!sglang/.venv-dsv4-sm120/
+!sglang/.venv-dsv4-sm120/**
+!sglang/python/
+!sglang/python/**
+!sglang/sgl-kernel/
+!sglang/sgl-kernel/**
+!sglang/3rdparty/
+!sglang/3rdparty/**
+!sglang/docker/
+!sglang/docker/entrypoint-dsv4-5090-vendored.sh
+!sglang/LICENSE
+!sglang/README.md
+!flashinfer-sm120-sparse-mla/
+!flashinfer-sm120-sparse-mla/**

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODEL_PATH="${MODEL_PATH:-/models/preset/deepseek-ai/DeepSeek-V4-Flash/v1.0}"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-DeepSeek-V4-Flash-local}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-30000}"
+TP="${TP:-8}"
+MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.85}"
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-8}"
+CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-8192}"
+MAX_PREFILL_TOKENS="${MAX_PREFILL_TOKENS:-32768}"
+CUDA_GRAPH_BS="${CUDA_GRAPH_BS:-1 2 4 8}"
+
+export VENV="${VENV:-/hisys/alan/sglang/.venv-dsv4-sm120}"
+export CUDA_HOME="${CUDA_HOME:-$VENV}"
+export CUDA_PATH="${CUDA_PATH:-$VENV}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0a}"
+export DG_JIT_NVCC_COMPILER="${DG_JIT_NVCC_COMPILER:-$VENV/bin/nvcc}"
+export SGLANG_ENABLE_JIT_DEEPGEMM="${SGLANG_ENABLE_JIT_DEEPGEMM:-1}"
+export SGLANG_OPT_DEEPGEMM_HC_PRENORM="${SGLANG_OPT_DEEPGEMM_HC_PRENORM:-1}"
+export SGLANG_OPT_USE_JIT_INDEXER_METADATA="${SGLANG_OPT_USE_JIT_INDEXER_METADATA:-0}"
+export SGLANG_V4_TRITON_SM120_TILE="${SGLANG_V4_TRITON_SM120_TILE:-auto}"
+export SGLANG_DSV4_FLASHINFER_SM120="${SGLANG_DSV4_FLASHINFER_SM120:-1}"
+export FLASHINFER_DISABLE_VERSION_CHECK="${FLASHINFER_DISABLE_VERSION_CHECK:-1}"
+export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK="${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-1024}"
+export PATH="$VENV/bin:${PATH}"
+export LD_LIBRARY_PATH="$VENV/lib:$VENV/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+
+exec "$VENV/bin/sglang" serve \
+  --model-path "$MODEL_PATH" \
+  --trust-remote-code \
+  --tp "$TP" \
+  --host "$HOST" \
+  --port "$PORT" \
+  --mem-fraction-static "$MEM_FRACTION_STATIC" \
+  --max-running-requests "$MAX_RUNNING_REQUESTS" \
+  --chunked-prefill-size "$CHUNKED_PREFILL_SIZE" \
+  --max-prefill-tokens "$MAX_PREFILL_TOKENS" \
+  --disable-flashinfer-autotune \
+  --reasoning-parser deepseek-v4 \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --cuda-graph-bs $CUDA_GRAPH_BS \
+  "$@"
