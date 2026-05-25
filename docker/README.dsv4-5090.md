@@ -41,10 +41,11 @@ The server automatically selected:
 - `moe_runner_backend=flashinfer_mxfp4`
 - GPU-only MXFP4 MoE on SM120
 
-## Build Custom Image
+## Build On Another Machine
 
-Clone this branch on a machine with Docker/BuildKit and CUDA-capable NVIDIA
-runtime support:
+This is the intended path for rebuilding the validated RTX 5090 environment on
+another machine. Clone this branch on a machine with Docker/BuildKit and
+CUDA-capable NVIDIA runtime support:
 
 ```bash
 git clone -b latest_5090 https://github.com/ziang663/sglang.git
@@ -57,9 +58,32 @@ The Dockerfile:
 
 - starts from `nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04`
 - installs this SGLang branch from source
+- installs the pinned SGLang Python dependencies from `python/pyproject.toml`
+- fetches FlashInfer at commit `c9ce444351052385828d607e57d78dfb65ac868e`
+- applies `docker/flashinfer-sm120-dsv4-pbs256.patch`
+- builds and installs the patched FlashInfer package in the image
 - fetches DeepGEMM PR318 at commit `7a7a41a1bac7dacabe74057e7600e59f98f85bce`
 - applies `docker/deepgemm-pr318-metadata-dynamic-smem.patch`
 - builds and installs the patched DeepGEMM package in the image
+
+## Build Vendored Local Environment Image
+
+This is only a snapshot/migration fallback for the original validation host. It
+requires the local `/hisys/alan` tree and is not the recommended way to rebuild
+the environment on a fresh machine. Build it from `/hisys/alan` instead of the
+SGLang repo root. This copies the local `.venv-dsv4-sm120` plus the editable
+SGLang and FlashInfer source trees into the same absolute paths used by the
+validated environment.
+
+```bash
+cd /hisys/alan
+DOCKER_BUILDKIT=1 \
+docker build \
+  -f sglang/docker/dsv4-5090-vendored.Dockerfile \
+  -t sglang-dsv4-5090:vendored .
+```
+
+Use `docker/dsv4-5090.Dockerfile` for normal rebuilds on other machines.
 
 ## Run
 
