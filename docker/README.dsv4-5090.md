@@ -1,8 +1,9 @@
 # DeepSeek V4 Flash on 8x RTX 5090
 
 This branch contains the RTX 5090 / SM120 path used to validate
-DeepSeek-V4-Flash with SGLang. The image is built from source and does not
-depend on the validation host's local virtualenv.
+DeepSeek-V4-Flash with SGLang. It is rebased on SGLang `v0.5.12.post1`. The
+image is built from source and does not depend on the validation host's local
+virtualenv.
 
 ## Validated Host Command
 
@@ -48,7 +49,7 @@ another machine. Clone this branch on a machine with Docker/BuildKit and
 CUDA-capable NVIDIA runtime support:
 
 ```bash
-git clone -b latest_5090 https://github.com/ziang663/sglang.git
+git clone -b latest_5090_v0.5.12.post1 https://github.com/ziang663/sglang.git
 cd sglang
 DOCKER_BUILDKIT=1 \
 docker build -f docker/dsv4-5090.Dockerfile -t sglang-dsv4-5090:sm120 .
