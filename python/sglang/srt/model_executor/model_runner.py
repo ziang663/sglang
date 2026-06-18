@@ -69,6 +69,7 @@ from sglang.srt.debug_utils.dumper import dumper
 from sglang.srt.debug_utils.tensor_dump_forward_hook import (
     register_forward_hook_for_model,
 )
+from sglang.srt.configs.model_config import get_dsa_index_topk, is_deepseek_dsa
 from sglang.srt.distributed import (
     get_default_distributed_backend,
     get_pp_group,
@@ -2758,6 +2759,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             cache_loc_dtype=torch.int64,
             enable_mamba_track=False,
             hc_hidden_size=getattr(self.model_config, "hc_hidden_size", None),
+            pp_proxy_topk=(
+                get_dsa_index_topk(self.model_config.hf_config)
+                if self.server_args.pp_size > 1
+                and is_deepseek_dsa(self.model_config.hf_config)
+                else None
+            ),
         )
         buffers.num_token_non_padded[...] = num_tokens
 
