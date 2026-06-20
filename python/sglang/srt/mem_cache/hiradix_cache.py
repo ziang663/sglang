@@ -940,6 +940,12 @@ class HiRadixCache(RadixCache):
             finish_count -= 1
 
     def loading_check(self):
+        if (
+            len(self.ongoing_load_back) == 0
+            and len(self.cache_controller.ack_load_queue) == 0
+        ):
+            return
+
         finish_count = 0
         if self.pp_rank == 0:
             for _, finish_event, ack_list in self.cache_controller.ack_load_queue:
