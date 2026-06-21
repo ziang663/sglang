@@ -1238,6 +1238,7 @@ class HiRadixCache(RadixCache):
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
+        extra_pools: Optional[list[PoolTransfer]] = None,
     ) -> int:
         if not self.enable_storage or self.cache_controller.prefetch_rate_limited():
             return 0
@@ -1256,6 +1257,7 @@ class HiRadixCache(RadixCache):
             prefetch_key,
             last_hash,
             prefix_keys,
+            extra_pools,
         )
         hash_values, storage_hit_count = self.cache_controller._storage_hit_query(
             operation
