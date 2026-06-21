@@ -825,7 +825,7 @@ class Req(ReqDllmMixin):
         # time and used to estimate uncached tokens / sort by longest prefix for
         # load reporting.
         self.num_matched_prefix_tokens = 0
-        # In PP + L3, downstream stages follow the first PP stage's storage
+        # In PP + HiCache, downstream stages follow the first PP stage's
         # prefix decision so every stage prefill/stores the same suffix.
         self.pp_storage_prefix_len: Optional[int] = None
         # Tokens loaded from storage backend (L3) during prefetch for this request

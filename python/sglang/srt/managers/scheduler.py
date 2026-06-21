@@ -1578,7 +1578,6 @@ class Scheduler(
             self.pp_group.world_size <= 1
             or not self.pp_group.is_first_rank
             or not self.enable_hierarchical_cache
-            or not getattr(self.tree_cache, "enable_storage", False)
         ):
             return
 
@@ -1588,6 +1587,12 @@ class Scheduler(
 
         for req in reversed(self.waiting_queue):
             if req.rid == rid:
+                if req.pp_storage_prefix_len is None:
+                    req.init_next_round_input(self.tree_cache)
+                    req.num_matched_prefix_tokens = min(
+                        len(req.prefix_indices) + req.host_hit_length,
+                        req._compute_max_prefix_len(len(req.fill_ids)),
+                    )
                 setattr(
                     recv_req,
                     "pp_storage_prefix_len",
@@ -2188,8 +2193,8 @@ class Scheduler(
                 expected_prefix_len = int(req.pp_storage_prefix_len)
                 if req.num_matched_prefix_tokens < expected_prefix_len:
                     logger.warning(
-                        "PP HiCache storage prefix from first stage is not fully "
-                        "available on this stage: rid=%s expected=%d actual=%d",
+                        "PP HiCache prefix from first stage is not fully available "
+                        "on this stage: rid=%s expected=%d actual=%d",
                         req.rid,
                         expected_prefix_len,
                         req.num_matched_prefix_tokens,
