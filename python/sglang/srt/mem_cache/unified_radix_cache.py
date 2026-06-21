@@ -347,6 +347,21 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
         if not waited and self.tp_world_size > 1:
             torch.distributed.barrier(group=self.tp_group)
 
+    def _sync_local_ready_count(
+        self, has_local_work: bool, local_ready_count: int
+    ) -> int:
+        has_work_tensor = torch.tensor(
+            int(has_local_work), dtype=torch.int, device="cpu"
+        )
+        self._all_reduce_attn_groups(has_work_tensor, torch.distributed.ReduceOp.MAX)
+        if has_work_tensor.item() == 0:
+            return 0
+
+        ready_count = local_ready_count if has_local_work else 2**30
+        ready_count_tensor = torch.tensor(ready_count, dtype=torch.int, device="cpu")
+        self._all_reduce_attn_groups(ready_count_tensor, torch.distributed.ReduceOp.MIN)
+        return int(ready_count_tensor.item())
+
     def _reap_completed_async_work(self):
         """
         Poll outstanding async work and reap completed ones.
@@ -2258,21 +2273,17 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
                 assert len(self.ongoing_write_through) == 0
             return
 
-        if len(self.ongoing_write_through) == 0:
-            return
-
         finish_count = 0
-        for _, finish_event, ack_list in cc.ack_write_queue:
-            if not finish_event.query():
-                break
-            finish_count += 1
-
-        finish_count_tensor = torch.tensor(finish_count, dtype=torch.int, device="cpu")
-        self._all_reduce_attn_groups(finish_count_tensor, torch.distributed.ReduceOp.MIN)
-        finish_count = finish_count_tensor.item()
+        has_local_work = len(self.ongoing_write_through) > 0
+        if has_local_work:
+            for _, finish_event, ack_list in cc.ack_write_queue:
+                if not finish_event.query():
+                    break
+                finish_count += 1
+        finish_count = self._sync_local_ready_count(has_local_work, finish_count)
 
         # Process completed acks
-        while finish_count > 0:
+        while finish_count > 0 and cc.ack_write_queue:
             _, finish_event, ack_list = cc.ack_write_queue.pop(0)
             finish_event.synchronize()
             for ack_id in ack_list:
@@ -2282,18 +2293,18 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
     def loading_check(self) -> None:
         """Poll load-back completions."""
         cc = self.cache_controller
-        if cc is None or not self.ongoing_load_back:
+        if cc is None:
             return
         finish_count = 0
-        for _, finish_event, ack_list in cc.ack_load_queue:
-            if not finish_event.query():
-                break
-            finish_count += 1
-        finish_count_tensor = torch.tensor(finish_count, dtype=torch.int, device="cpu")
-        self._all_reduce_attn_groups(finish_count_tensor, torch.distributed.ReduceOp.MIN)
-        finish_count = finish_count_tensor.item()
+        has_local_work = len(self.ongoing_load_back) > 0
+        if has_local_work:
+            for _, finish_event, ack_list in cc.ack_load_queue:
+                if not finish_event.query():
+                    break
+                finish_count += 1
+        finish_count = self._sync_local_ready_count(has_local_work, finish_count)
 
-        while finish_count > 0:
+        while finish_count > 0 and cc.ack_load_queue:
             _, finish_event, ack_list = cc.ack_load_queue.pop(0)
             finish_event.synchronize()
             for ack_id in ack_list:
