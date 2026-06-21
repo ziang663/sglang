@@ -2262,14 +2262,13 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
             return
 
         finish_count = 0
-        if self.pp_rank == 0:
-            for _, finish_event, ack_list in cc.ack_write_queue:
-                if not finish_event.query():
-                    break
-                finish_count += 1
+        for _, finish_event, ack_list in cc.ack_write_queue:
+            if not finish_event.query():
+                break
+            finish_count += 1
 
         finish_count_tensor = torch.tensor(finish_count, dtype=torch.int, device="cpu")
-        self._all_reduce(finish_count_tensor, torch.distributed.ReduceOp.MIN)
+        self._all_reduce_attn_groups(finish_count_tensor, torch.distributed.ReduceOp.MIN)
         finish_count = finish_count_tensor.item()
 
         # Process completed acks
@@ -2286,13 +2285,12 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
         if cc is None or not self.ongoing_load_back:
             return
         finish_count = 0
-        if self.pp_rank == 0:
-            for _, finish_event, ack_list in cc.ack_load_queue:
-                if not finish_event.query():
-                    break
-                finish_count += 1
+        for _, finish_event, ack_list in cc.ack_load_queue:
+            if not finish_event.query():
+                break
+            finish_count += 1
         finish_count_tensor = torch.tensor(finish_count, dtype=torch.int, device="cpu")
-        self._all_reduce(finish_count_tensor, torch.distributed.ReduceOp.MIN)
+        self._all_reduce_attn_groups(finish_count_tensor, torch.distributed.ReduceOp.MIN)
         finish_count = finish_count_tensor.item()
 
         while finish_count > 0:

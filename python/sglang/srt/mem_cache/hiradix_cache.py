@@ -921,13 +921,12 @@ class HiRadixCache(RadixCache):
             return
 
         finish_count = 0
-        if self.pp_rank == 0:
-            for _, finish_event, ack_list in self.cache_controller.ack_write_queue:
-                if not finish_event.query():
-                    break
-                finish_count += 1
+        for _, finish_event, ack_list in self.cache_controller.ack_write_queue:
+            if not finish_event.query():
+                break
+            finish_count += 1
         finish_count_tensor = torch.tensor(finish_count, dtype=torch.int, device="cpu")
-        self._all_reduce(finish_count_tensor, torch.distributed.ReduceOp.MIN)
+        self._all_reduce_attn_groups(finish_count_tensor, torch.distributed.ReduceOp.MIN)
         finish_count = finish_count_tensor.item()
 
         if finish_count > 0:
@@ -941,13 +940,12 @@ class HiRadixCache(RadixCache):
 
     def loading_check(self):
         finish_count = 0
-        if self.pp_rank == 0:
-            for _, finish_event, ack_list in self.cache_controller.ack_load_queue:
-                if not finish_event.query():
-                    break
-                finish_count += 1
+        for _, finish_event, ack_list in self.cache_controller.ack_load_queue:
+            if not finish_event.query():
+                break
+            finish_count += 1
         finish_count_tensor = torch.tensor(finish_count, dtype=torch.int, device="cpu")
-        self._all_reduce(finish_count_tensor, torch.distributed.ReduceOp.MIN)
+        self._all_reduce_attn_groups(finish_count_tensor, torch.distributed.ReduceOp.MIN)
         finish_count = finish_count_tensor.item()
 
         if finish_count > 0:
