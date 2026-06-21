@@ -1609,10 +1609,38 @@ class Scheduler(
                 else:
                     if self.ipc_channels.recv_from_rpc is not None:
                         self.ipc_channels.recv_from_rpc.send_pyobj(output)
+            self._maybe_attach_pp_storage_prefix_len(recv_req)
 
         self.flush_wrapper.check_pending()
         if self.external_corpus_manager is not None:
             self.external_corpus_manager.check_pending_load()
+
+    def _maybe_attach_pp_storage_prefix_len(self, recv_req) -> None:
+        if (
+            self.pp_group.world_size <= 1
+            or not self.pp_group.is_first_rank
+            or not self.enable_hierarchical_cache
+        ):
+            return
+
+        rid = getattr(recv_req, "rid", None)
+        if rid is None:
+            return
+
+        for req in reversed(self.waiting_queue):
+            if req.rid == rid:
+                if req.pp_storage_prefix_len is None:
+                    req.init_next_round_input(self.tree_cache)
+                    req.num_matched_prefix_tokens = min(
+                        len(req.prefix_indices) + req.host_hit_length,
+                        req._compute_max_prefix_len(len(req.full_untruncated_fill_ids)),
+                    )
+                setattr(
+                    recv_req,
+                    "pp_storage_prefix_len",
+                    int(req.pp_storage_prefix_len or req.num_matched_prefix_tokens),
+                )
+                return
 
     def init_profiler(self) -> None:
         self.profiler_manager = SchedulerProfilerManager(
@@ -2081,6 +2109,8 @@ class Scheduler(
             self._add_request_to_queue(req)
             return
 
+        req.pp_storage_prefix_len = getattr(recv_req, "pp_storage_prefix_len", None)
+
         if self.spec_algorithm.is_dflash():
             error_msg = validate_dflash_request(req, self.enable_overlap)
             if error_msg is not None:
@@ -2196,21 +2226,61 @@ class Scheduler(
 
     def _prefetch_kvcache(self, req: Req):
         if self.enable_hicache_storage:
-            req.init_next_round_input(self.tree_cache, cow_mamba=False)
+            req.init_next_round_input(
+                self.tree_cache,
+                cow_mamba=False,
+                match_prefix_limit=req.pp_storage_prefix_len,
+            )
+            if req.pp_storage_prefix_len is not None:
+                expected_prefix_len = int(req.pp_storage_prefix_len)
+                if req.num_matched_prefix_tokens < expected_prefix_len:
+                    logger.warning(
+                        "PP HiCache prefix from first stage is not fully available "
+                        "on this stage: rid=%s expected=%d actual=%d",
+                        req.rid,
+                        expected_prefix_len,
+                        req.num_matched_prefix_tokens,
+                    )
             last_host_node = req.last_host_node
             if last_host_node.backuped or last_host_node is self.tree_cache.root_node:
                 last_hash = last_host_node.get_last_hash_value()
                 matched_len = len(req.prefix_indices) + req.host_hit_length
-                match_end = req._compute_max_prefix_len(
-                    len(req.full_untruncated_fill_ids)
+                prefetch_limit = (
+                    int(req.pp_storage_prefix_len)
+                    if req.pp_storage_prefix_len is not None
+                    else req._compute_max_prefix_len(len(req.full_untruncated_fill_ids))
                 )
-                new_input_tokens = req.full_untruncated_fill_ids[matched_len:match_end]
+                prefetch_limit = max(matched_len, prefetch_limit)
+                new_input_tokens = req.full_untruncated_fill_ids[
+                    matched_len:prefetch_limit
+                ]
 
                 prefix_keys = (
                     last_host_node.get_prefix_hash_values(last_host_node.parent)
                     if self.tree_cache.hicache_storage_pass_prefix_keys
                     else None
                 )
+                if (
+                    self.pp_group.world_size > 1
+                    and self.pp_group.is_first_rank
+                    and req.pp_storage_prefix_len is None
+                ):
+                    storage_hit_length = self.tree_cache.query_storage_hit_length(
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                        **self.tree_cache._get_extra_pools(),
+                    )
+                    req.pp_storage_prefix_len = min(
+                        matched_len + storage_hit_length,
+                        req._compute_max_prefix_len(
+                            len(req.full_untruncated_fill_ids)
+                        ),
+                    )
+                    new_input_tokens = req.full_untruncated_fill_ids[
+                        matched_len : int(req.pp_storage_prefix_len)
+                    ]
                 self.tree_cache.prefetch_from_storage(
                     req.rid,
                     last_host_node,
@@ -2808,7 +2878,10 @@ class Scheduler(
                     req.rid
                 )
 
-            req.init_next_round_input(self.tree_cache)
+            req.init_next_round_input(
+                self.tree_cache,
+                match_prefix_limit=req.pp_storage_prefix_len,
+            )
             res = adder.add_one_req(
                 req,
                 has_chunked_req=(self.chunked_req is not None),

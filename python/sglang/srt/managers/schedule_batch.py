@@ -859,6 +859,9 @@ class Req(ReqDllmMixin):
         # time and used to estimate uncached tokens / sort by longest prefix for
         # load reporting.
         self.num_matched_prefix_tokens = 0
+        # In PP + HiCache, downstream stages follow the first PP stage's
+        # prefix decision so every stage prefill/stores the same suffix.
+        self.pp_storage_prefix_len: Optional[int] = None
         # Tokens loaded from storage backend (L3) during prefetch for this request
         self.storage_hit_length = 0
         # The node to lock until for swa radix tree lock ref
@@ -1124,6 +1127,7 @@ class Req(ReqDllmMixin):
         self,
         tree_cache: Optional[BasePrefixCache] = None,
         cow_mamba: Optional[bool] = None,
+        match_prefix_limit: Optional[int] = None,
     ):
         if self.is_dllm():
             self._init_fill_ids_for_dllm()
@@ -1153,6 +1157,8 @@ class Req(ReqDllmMixin):
         # avoiding an O(context) copy per prefill-batch build.
         token_ids_to_match = self.full_untruncated_fill_ids
         key_limit: Optional[int] = self._compute_max_prefix_len(input_len)
+        if match_prefix_limit is not None:
+            key_limit = min(key_limit, match_prefix_limit)
 
         # Disable prefix caching when embed overrides are present: same token IDs
         # with different override vectors must not share cached KV values.
