@@ -15,6 +15,16 @@ package has been built.
 import os
 
 from setuptools import setup
+from setuptools.command.build_ext import build_ext as build_ext_orig
+
+try:
+    from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
+except ModuleNotFoundError as exc:
+    if exc.name != "torch":
+        raise
+    CUDA_HOME = None
+    BuildExtension = None
+    CUDAExtension = None
 
 try:
     from setuptools_rust import build_rust
@@ -25,6 +35,87 @@ except ModuleNotFoundError as exc:
     build_rust = None
 
 _BUILD_RUST_EXTS_ENV = "SGLANG_BUILD_RUST_EXTS"
+_BUILD_FLASHBOOT_ENV = "SGLANG_BUILD_FLASHBOOT"
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _flashboot_rdma_enabled() -> bool:
+    requested = os.environ.get("FB_BUILD_RDMA", "auto").strip().lower()
+    if requested in ("1", "true", "yes", "on"):
+        return True
+    if requested in ("0", "false", "no", "off"):
+        return False
+    if requested not in ("", "auto"):
+        raise ValueError(
+            f"FB_BUILD_RDMA={requested!r} is not supported: expected auto, 1 or 0"
+        )
+
+    include_dirs = ["/usr/include", "/usr/local/include"]
+    include_dirs += os.environ.get("CPATH", "").split(os.pathsep)
+    include_dirs += os.environ.get("C_INCLUDE_PATH", "").split(os.pathsep)
+    include_dirs += os.environ.get("CPLUS_INCLUDE_PATH", "").split(os.pathsep)
+    for prefix_var in ("CONDA_PREFIX", "PREFIX"):
+        prefix = os.environ.get(prefix_var, "")
+        if prefix:
+            include_dirs.append(os.path.join(prefix, "include"))
+    return any(
+        directory
+        and os.path.exists(os.path.join(directory, "infiniband", "verbs.h"))
+        for directory in include_dirs
+    )
+
+
+def _flashboot_extension():
+    if not _truthy_env(_BUILD_FLASHBOOT_ENV):
+        return None
+    if CUDAExtension is None or BuildExtension is None:
+        raise RuntimeError(
+            f"{_BUILD_FLASHBOOT_ENV}=1 requires torch to be installed at build time"
+        )
+
+    build_rdma = _flashboot_rdma_enabled()
+    sources = [
+        "../csrc/flashboot/python_bindings.cc",
+        "../csrc/flashboot/device_arena.cu",
+        "../csrc/flashboot/pinned_stage.cpp",
+        "../csrc/flashboot/peer_arena_import.cu",
+        "../csrc/flashboot/imex_check.cc",
+        "../csrc/flashboot/chain_broadcast.cu",
+    ]
+    if build_rdma:
+        sources.append("../csrc/flashboot/rdma_read.cpp")
+
+    arches = os.environ.get("FLASHBOOT_CUDA_ARCH", "9.0;10.0").split(";")
+    nvcc_arch = []
+    for arch in arches:
+        arch = arch.strip().replace(".", "")
+        if arch:
+            nvcc_arch += [f"-gencode=arch=compute_{arch},code=sm_{arch}"]
+
+    rdma_macros = [] if build_rdma else ["-DFB_NO_RDMA"]
+    driver_stub_dirs = (
+        [os.path.join(CUDA_HOME, "lib64", "stubs")] if CUDA_HOME else []
+    )
+    return CUDAExtension(
+        name="flashboot._C",
+        sources=sources,
+        include_dirs=["../include"],
+        libraries=(["ibverbs"] if build_rdma else []) + ["cuda"],
+        library_dirs=driver_stub_dirs,
+        extra_compile_args={
+            "cxx": [
+                "-O3",
+                "-std=c++17",
+                "-fvisibility=default",
+                "-pthread",
+            ]
+            + rdma_macros,
+            "nvcc": ["-O3", "-std=c++17"] + rdma_macros + nvcc_arch,
+        },
+    )
 
 
 def _selected_rust_extensions(declared):
@@ -88,5 +179,11 @@ if build_rust is not None:
 else:
     _cmdclass = {}
 
+flashboot_ext = _flashboot_extension()
+ext_modules = [flashboot_ext] if flashboot_ext is not None else []
+if flashboot_ext is not None:
+    _cmdclass["build_ext"] = BuildExtension
+else:
+    _cmdclass.setdefault("build_ext", build_ext_orig)
 
-setup(cmdclass=_cmdclass)
+setup(cmdclass=_cmdclass, ext_modules=ext_modules)
